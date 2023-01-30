@@ -1,0 +1,1324 @@
+(function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module '"+i+"'");throw a.code="MODULE_NOT_FOUND",a}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){var n=e[i][1][r];return o(n||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r})()({1:[function(require,module,exports){
+(function(window, factory) {
+	var lazySizes = factory(window, window.document, Date);
+	window.lazySizes = lazySizes;
+	if(typeof module == 'object' && module.exports){
+		module.exports = lazySizes;
+	}
+}(typeof window != 'undefined' ?
+      window : {}, function l(window, document, Date) { // Pass in the windoe Date function also for SSR because the Date class can be lost
+	'use strict';
+	/*jshint eqnull:true */
+
+	var lazysizes, lazySizesCfg;
+
+	(function(){
+		var prop;
+
+		var lazySizesDefaults = {
+			lazyClass: 'lazyload',
+			loadedClass: 'lazyloaded',
+			loadingClass: 'lazyloading',
+			preloadClass: 'lazypreload',
+			errorClass: 'lazyerror',
+			//strictClass: 'lazystrict',
+			autosizesClass: 'lazyautosizes',
+			srcAttr: 'data-src',
+			srcsetAttr: 'data-srcset',
+			sizesAttr: 'data-sizes',
+			//preloadAfterLoad: false,
+			minSize: 40,
+			customMedia: {},
+			init: true,
+			expFactor: 1.5,
+			hFac: 0.8,
+			loadMode: 2,
+			loadHidden: true,
+			ricTimeout: 0,
+			throttleDelay: 125,
+		};
+
+		lazySizesCfg = window.lazySizesConfig || window.lazysizesConfig || {};
+
+		for(prop in lazySizesDefaults){
+			if(!(prop in lazySizesCfg)){
+				lazySizesCfg[prop] = lazySizesDefaults[prop];
+			}
+		}
+	})();
+
+	if (!document || !document.getElementsByClassName) {
+		return {
+			init: function () {},
+			cfg: lazySizesCfg,
+			noSupport: true,
+		};
+	}
+
+	var docElem = document.documentElement;
+
+	var supportPicture = window.HTMLPictureElement;
+
+	var _addEventListener = 'addEventListener';
+
+	var _getAttribute = 'getAttribute';
+
+	/**
+	 * Update to bind to window because 'this' becomes null during SSR
+	 * builds.
+	 */
+	var addEventListener = window[_addEventListener].bind(window);
+
+	var setTimeout = window.setTimeout;
+
+	var requestAnimationFrame = window.requestAnimationFrame || setTimeout;
+
+	var requestIdleCallback = window.requestIdleCallback;
+
+	var regPicture = /^picture$/i;
+
+	var loadEvents = ['load', 'error', 'lazyincluded', '_lazyloaded'];
+
+	var regClassCache = {};
+
+	var forEach = Array.prototype.forEach;
+
+	var hasClass = function(ele, cls) {
+		if(!regClassCache[cls]){
+			regClassCache[cls] = new RegExp('(\\s|^)'+cls+'(\\s|$)');
+		}
+		return regClassCache[cls].test(ele[_getAttribute]('class') || '') && regClassCache[cls];
+	};
+
+	var addClass = function(ele, cls) {
+		if (!hasClass(ele, cls)){
+			ele.setAttribute('class', (ele[_getAttribute]('class') || '').trim() + ' ' + cls);
+		}
+	};
+
+	var removeClass = function(ele, cls) {
+		var reg;
+		if ((reg = hasClass(ele,cls))) {
+			ele.setAttribute('class', (ele[_getAttribute]('class') || '').replace(reg, ' '));
+		}
+	};
+
+	var addRemoveLoadEvents = function(dom, fn, add){
+		var action = add ? _addEventListener : 'removeEventListener';
+		if(add){
+			addRemoveLoadEvents(dom, fn);
+		}
+		loadEvents.forEach(function(evt){
+			dom[action](evt, fn);
+		});
+	};
+
+	var triggerEvent = function(elem, name, detail, noBubbles, noCancelable){
+		var event = document.createEvent('Event');
+
+		if(!detail){
+			detail = {};
+		}
+
+		detail.instance = lazysizes;
+
+		event.initEvent(name, !noBubbles, !noCancelable);
+
+		event.detail = detail;
+
+		elem.dispatchEvent(event);
+		return event;
+	};
+
+	var updatePolyfill = function (el, full){
+		var polyfill;
+		if( !supportPicture && ( polyfill = (window.picturefill || lazySizesCfg.pf) ) ){
+			if(full && full.src && !el[_getAttribute]('srcset')){
+				el.setAttribute('srcset', full.src);
+			}
+			polyfill({reevaluate: true, elements: [el]});
+		} else if(full && full.src){
+			el.src = full.src;
+		}
+	};
+
+	var getCSS = function (elem, style){
+		return (getComputedStyle(elem, null) || {})[style];
+	};
+
+	var getWidth = function(elem, parent, width){
+		width = width || elem.offsetWidth;
+
+		while(width < lazySizesCfg.minSize && parent && !elem._lazysizesWidth){
+			width =  parent.offsetWidth;
+			parent = parent.parentNode;
+		}
+
+		return width;
+	};
+
+	var rAF = (function(){
+		var running, waiting;
+		var firstFns = [];
+		var secondFns = [];
+		var fns = firstFns;
+
+		var run = function(){
+			var runFns = fns;
+
+			fns = firstFns.length ? secondFns : firstFns;
+
+			running = true;
+			waiting = false;
+
+			while(runFns.length){
+				runFns.shift()();
+			}
+
+			running = false;
+		};
+
+		var rafBatch = function(fn, queue){
+			if(running && !queue){
+				fn.apply(this, arguments);
+			} else {
+				fns.push(fn);
+
+				if(!waiting){
+					waiting = true;
+					(document.hidden ? setTimeout : requestAnimationFrame)(run);
+				}
+			}
+		};
+
+		rafBatch._lsFlush = run;
+
+		return rafBatch;
+	})();
+
+	var rAFIt = function(fn, simple){
+		return simple ?
+			function() {
+				rAF(fn);
+			} :
+			function(){
+				var that = this;
+				var args = arguments;
+				rAF(function(){
+					fn.apply(that, args);
+				});
+			}
+		;
+	};
+
+	var throttle = function(fn){
+		var running;
+		var lastTime = 0;
+		var gDelay = lazySizesCfg.throttleDelay;
+		var rICTimeout = lazySizesCfg.ricTimeout;
+		var run = function(){
+			running = false;
+			lastTime = Date.now();
+			fn();
+		};
+		var idleCallback = requestIdleCallback && rICTimeout > 49 ?
+			function(){
+				requestIdleCallback(run, {timeout: rICTimeout});
+
+				if(rICTimeout !== lazySizesCfg.ricTimeout){
+					rICTimeout = lazySizesCfg.ricTimeout;
+				}
+			} :
+			rAFIt(function(){
+				setTimeout(run);
+			}, true)
+		;
+
+		return function(isPriority){
+			var delay;
+
+			if((isPriority = isPriority === true)){
+				rICTimeout = 33;
+			}
+
+			if(running){
+				return;
+			}
+
+			running =  true;
+
+			delay = gDelay - (Date.now() - lastTime);
+
+			if(delay < 0){
+				delay = 0;
+			}
+
+			if(isPriority || delay < 9){
+				idleCallback();
+			} else {
+				setTimeout(idleCallback, delay);
+			}
+		};
+	};
+
+	//based on http://modernjavascript.blogspot.de/2013/08/building-better-debounce.html
+	var debounce = function(func) {
+		var timeout, timestamp;
+		var wait = 99;
+		var run = function(){
+			timeout = null;
+			func();
+		};
+		var later = function() {
+			var last = Date.now() - timestamp;
+
+			if (last < wait) {
+				setTimeout(later, wait - last);
+			} else {
+				(requestIdleCallback || run)(run);
+			}
+		};
+
+		return function() {
+			timestamp = Date.now();
+
+			if (!timeout) {
+				timeout = setTimeout(later, wait);
+			}
+		};
+	};
+
+	var loader = (function(){
+		var preloadElems, isCompleted, resetPreloadingTimer, loadMode, started;
+
+		var eLvW, elvH, eLtop, eLleft, eLright, eLbottom, isBodyHidden;
+
+		var regImg = /^img$/i;
+		var regIframe = /^iframe$/i;
+
+		var supportScroll = ('onscroll' in window) && !(/(gle|ing)bot/.test(navigator.userAgent));
+
+		var shrinkExpand = 0;
+		var currentExpand = 0;
+
+		var isLoading = 0;
+		var lowRuns = -1;
+
+		var resetPreloading = function(e){
+			isLoading--;
+			if(!e || isLoading < 0 || !e.target){
+				isLoading = 0;
+			}
+		};
+
+		var isVisible = function (elem) {
+			if (isBodyHidden == null) {
+				isBodyHidden = getCSS(document.body, 'visibility') == 'hidden';
+			}
+
+			return isBodyHidden || !(getCSS(elem.parentNode, 'visibility') == 'hidden' && getCSS(elem, 'visibility') == 'hidden');
+		};
+
+		var isNestedVisible = function(elem, elemExpand){
+			var outerRect;
+			var parent = elem;
+			var visible = isVisible(elem);
+
+			eLtop -= elemExpand;
+			eLbottom += elemExpand;
+			eLleft -= elemExpand;
+			eLright += elemExpand;
+
+			while(visible && (parent = parent.offsetParent) && parent != document.body && parent != docElem){
+				visible = ((getCSS(parent, 'opacity') || 1) > 0);
+
+				if(visible && getCSS(parent, 'overflow') != 'visible'){
+					outerRect = parent.getBoundingClientRect();
+					visible = eLright > outerRect.left &&
+						eLleft < outerRect.right &&
+						eLbottom > outerRect.top - 1 &&
+						eLtop < outerRect.bottom + 1
+					;
+				}
+			}
+
+			return visible;
+		};
+
+		var checkElements = function() {
+			var eLlen, i, rect, autoLoadElem, loadedSomething, elemExpand, elemNegativeExpand, elemExpandVal,
+				beforeExpandVal, defaultExpand, preloadExpand, hFac;
+			var lazyloadElems = lazysizes.elements;
+
+			if((loadMode = lazySizesCfg.loadMode) && isLoading < 8 && (eLlen = lazyloadElems.length)){
+
+				i = 0;
+
+				lowRuns++;
+
+				for(; i < eLlen; i++){
+
+					if(!lazyloadElems[i] || lazyloadElems[i]._lazyRace){continue;}
+
+					if(!supportScroll || (lazysizes.prematureUnveil && lazysizes.prematureUnveil(lazyloadElems[i]))){unveilElement(lazyloadElems[i]);continue;}
+
+					if(!(elemExpandVal = lazyloadElems[i][_getAttribute]('data-expand')) || !(elemExpand = elemExpandVal * 1)){
+						elemExpand = currentExpand;
+					}
+
+					if (!defaultExpand) {
+						defaultExpand = (!lazySizesCfg.expand || lazySizesCfg.expand < 1) ?
+							docElem.clientHeight > 500 && docElem.clientWidth > 500 ? 500 : 370 :
+							lazySizesCfg.expand;
+
+						lazysizes._defEx = defaultExpand;
+
+						preloadExpand = defaultExpand * lazySizesCfg.expFactor;
+						hFac = lazySizesCfg.hFac;
+						isBodyHidden = null;
+
+						if(currentExpand < preloadExpand && isLoading < 1 && lowRuns > 2 && loadMode > 2 && !document.hidden){
+							currentExpand = preloadExpand;
+							lowRuns = 0;
+						} else if(loadMode > 1 && lowRuns > 1 && isLoading < 6){
+							currentExpand = defaultExpand;
+						} else {
+							currentExpand = shrinkExpand;
+						}
+					}
+
+					if(beforeExpandVal !== elemExpand){
+						eLvW = innerWidth + (elemExpand * hFac);
+						elvH = innerHeight + elemExpand;
+						elemNegativeExpand = elemExpand * -1;
+						beforeExpandVal = elemExpand;
+					}
+
+					rect = lazyloadElems[i].getBoundingClientRect();
+
+					if ((eLbottom = rect.bottom) >= elemNegativeExpand &&
+						(eLtop = rect.top) <= elvH &&
+						(eLright = rect.right) >= elemNegativeExpand * hFac &&
+						(eLleft = rect.left) <= eLvW &&
+						(eLbottom || eLright || eLleft || eLtop) &&
+						(lazySizesCfg.loadHidden || isVisible(lazyloadElems[i])) &&
+						((isCompleted && isLoading < 3 && !elemExpandVal && (loadMode < 3 || lowRuns < 4)) || isNestedVisible(lazyloadElems[i], elemExpand))){
+						unveilElement(lazyloadElems[i]);
+						loadedSomething = true;
+						if(isLoading > 9){break;}
+					} else if(!loadedSomething && isCompleted && !autoLoadElem &&
+						isLoading < 4 && lowRuns < 4 && loadMode > 2 &&
+						(preloadElems[0] || lazySizesCfg.preloadAfterLoad) &&
+						(preloadElems[0] || (!elemExpandVal && ((eLbottom || eLright || eLleft || eLtop) || lazyloadElems[i][_getAttribute](lazySizesCfg.sizesAttr) != 'auto')))){
+						autoLoadElem = preloadElems[0] || lazyloadElems[i];
+					}
+				}
+
+				if(autoLoadElem && !loadedSomething){
+					unveilElement(autoLoadElem);
+				}
+			}
+		};
+
+		var throttledCheckElements = throttle(checkElements);
+
+		var switchLoadingClass = function(e){
+			var elem = e.target;
+
+			if (elem._lazyCache) {
+				delete elem._lazyCache;
+				return;
+			}
+
+			resetPreloading(e);
+			addClass(elem, lazySizesCfg.loadedClass);
+			removeClass(elem, lazySizesCfg.loadingClass);
+			addRemoveLoadEvents(elem, rafSwitchLoadingClass);
+			triggerEvent(elem, 'lazyloaded');
+		};
+		var rafedSwitchLoadingClass = rAFIt(switchLoadingClass);
+		var rafSwitchLoadingClass = function(e){
+			rafedSwitchLoadingClass({target: e.target});
+		};
+
+		var changeIframeSrc = function(elem, src){
+			try {
+				elem.contentWindow.location.replace(src);
+			} catch(e){
+				elem.src = src;
+			}
+		};
+
+		var handleSources = function(source){
+			var customMedia;
+
+			var sourceSrcset = source[_getAttribute](lazySizesCfg.srcsetAttr);
+
+			if( (customMedia = lazySizesCfg.customMedia[source[_getAttribute]('data-media') || source[_getAttribute]('media')]) ){
+				source.setAttribute('media', customMedia);
+			}
+
+			if(sourceSrcset){
+				source.setAttribute('srcset', sourceSrcset);
+			}
+		};
+
+		var lazyUnveil = rAFIt(function (elem, detail, isAuto, sizes, isImg){
+			var src, srcset, parent, isPicture, event, firesLoad;
+
+			if(!(event = triggerEvent(elem, 'lazybeforeunveil', detail)).defaultPrevented){
+
+				if(sizes){
+					if(isAuto){
+						addClass(elem, lazySizesCfg.autosizesClass);
+					} else {
+						elem.setAttribute('sizes', sizes);
+					}
+				}
+
+				srcset = elem[_getAttribute](lazySizesCfg.srcsetAttr);
+				src = elem[_getAttribute](lazySizesCfg.srcAttr);
+
+				if(isImg) {
+					parent = elem.parentNode;
+					isPicture = parent && regPicture.test(parent.nodeName || '');
+				}
+
+				firesLoad = detail.firesLoad || (('src' in elem) && (srcset || src || isPicture));
+
+				event = {target: elem};
+
+				addClass(elem, lazySizesCfg.loadingClass);
+
+				if(firesLoad){
+					clearTimeout(resetPreloadingTimer);
+					resetPreloadingTimer = setTimeout(resetPreloading, 2500);
+					addRemoveLoadEvents(elem, rafSwitchLoadingClass, true);
+				}
+
+				if(isPicture){
+					forEach.call(parent.getElementsByTagName('source'), handleSources);
+				}
+
+				if(srcset){
+					elem.setAttribute('srcset', srcset);
+				} else if(src && !isPicture){
+					if(regIframe.test(elem.nodeName)){
+						changeIframeSrc(elem, src);
+					} else {
+						elem.src = src;
+					}
+				}
+
+				if(isImg && (srcset || isPicture)){
+					updatePolyfill(elem, {src: src});
+				}
+			}
+
+			if(elem._lazyRace){
+				delete elem._lazyRace;
+			}
+			removeClass(elem, lazySizesCfg.lazyClass);
+
+			rAF(function(){
+				// Part of this can be removed as soon as this fix is older: https://bugs.chromium.org/p/chromium/issues/detail?id=7731 (2015)
+				var isLoaded = elem.complete && elem.naturalWidth > 1;
+
+				if( !firesLoad || isLoaded){
+					if (isLoaded) {
+						addClass(elem, 'ls-is-cached');
+					}
+					switchLoadingClass(event);
+					elem._lazyCache = true;
+					setTimeout(function(){
+						if ('_lazyCache' in elem) {
+							delete elem._lazyCache;
+						}
+					}, 9);
+				}
+				if (elem.loading == 'lazy') {
+					isLoading--;
+				}
+			}, true);
+		});
+
+		var unveilElement = function (elem){
+			if (elem._lazyRace) {return;}
+			var detail;
+
+			var isImg = regImg.test(elem.nodeName);
+
+			//allow using sizes="auto", but don't use. it's invalid. Use data-sizes="auto" or a valid value for sizes instead (i.e.: sizes="80vw")
+			var sizes = isImg && (elem[_getAttribute](lazySizesCfg.sizesAttr) || elem[_getAttribute]('sizes'));
+			var isAuto = sizes == 'auto';
+
+			if( (isAuto || !isCompleted) && isImg && (elem[_getAttribute]('src') || elem.srcset) && !elem.complete && !hasClass(elem, lazySizesCfg.errorClass) && hasClass(elem, lazySizesCfg.lazyClass)){return;}
+
+			detail = triggerEvent(elem, 'lazyunveilread').detail;
+
+			if(isAuto){
+				 autoSizer.updateElem(elem, true, elem.offsetWidth);
+			}
+
+			elem._lazyRace = true;
+			isLoading++;
+
+			lazyUnveil(elem, detail, isAuto, sizes, isImg);
+		};
+
+		var afterScroll = debounce(function(){
+			lazySizesCfg.loadMode = 3;
+			throttledCheckElements();
+		});
+
+		var altLoadmodeScrollListner = function(){
+			if(lazySizesCfg.loadMode == 3){
+				lazySizesCfg.loadMode = 2;
+			}
+			afterScroll();
+		};
+
+		var onload = function(){
+			if(isCompleted){return;}
+			if(Date.now() - started < 999){
+				setTimeout(onload, 999);
+				return;
+			}
+
+
+			isCompleted = true;
+
+			lazySizesCfg.loadMode = 3;
+
+			throttledCheckElements();
+
+			addEventListener('scroll', altLoadmodeScrollListner, true);
+		};
+
+		return {
+			_: function(){
+				started = Date.now();
+
+				lazysizes.elements = document.getElementsByClassName(lazySizesCfg.lazyClass);
+				preloadElems = document.getElementsByClassName(lazySizesCfg.lazyClass + ' ' + lazySizesCfg.preloadClass);
+
+				addEventListener('scroll', throttledCheckElements, true);
+
+				addEventListener('resize', throttledCheckElements, true);
+
+				addEventListener('pageshow', function (e) {
+					if (e.persisted) {
+						var loadingElements = document.querySelectorAll('.' + lazySizesCfg.loadingClass);
+
+						if (loadingElements.length && loadingElements.forEach) {
+							requestAnimationFrame(function () {
+								loadingElements.forEach( function (img) {
+									if (img.complete) {
+										unveilElement(img);
+									}
+								});
+							});
+						}
+					}
+				});
+
+				if(window.MutationObserver){
+					new MutationObserver( throttledCheckElements ).observe( docElem, {childList: true, subtree: true, attributes: true} );
+				} else {
+					docElem[_addEventListener]('DOMNodeInserted', throttledCheckElements, true);
+					docElem[_addEventListener]('DOMAttrModified', throttledCheckElements, true);
+					setInterval(throttledCheckElements, 999);
+				}
+
+				addEventListener('hashchange', throttledCheckElements, true);
+
+				//, 'fullscreenchange'
+				['focus', 'mouseover', 'click', 'load', 'transitionend', 'animationend'].forEach(function(name){
+					document[_addEventListener](name, throttledCheckElements, true);
+				});
+
+				if((/d$|^c/.test(document.readyState))){
+					onload();
+				} else {
+					addEventListener('load', onload);
+					document[_addEventListener]('DOMContentLoaded', throttledCheckElements);
+					setTimeout(onload, 20000);
+				}
+
+				if(lazysizes.elements.length){
+					checkElements();
+					rAF._lsFlush();
+				} else {
+					throttledCheckElements();
+				}
+			},
+			checkElems: throttledCheckElements,
+			unveil: unveilElement,
+			_aLSL: altLoadmodeScrollListner,
+		};
+	})();
+
+
+	var autoSizer = (function(){
+		var autosizesElems;
+
+		var sizeElement = rAFIt(function(elem, parent, event, width){
+			var sources, i, len;
+			elem._lazysizesWidth = width;
+			width += 'px';
+
+			elem.setAttribute('sizes', width);
+
+			if(regPicture.test(parent.nodeName || '')){
+				sources = parent.getElementsByTagName('source');
+				for(i = 0, len = sources.length; i < len; i++){
+					sources[i].setAttribute('sizes', width);
+				}
+			}
+
+			if(!event.detail.dataAttr){
+				updatePolyfill(elem, event.detail);
+			}
+		});
+		var getSizeElement = function (elem, dataAttr, width){
+			var event;
+			var parent = elem.parentNode;
+
+			if(parent){
+				width = getWidth(elem, parent, width);
+				event = triggerEvent(elem, 'lazybeforesizes', {width: width, dataAttr: !!dataAttr});
+
+				if(!event.defaultPrevented){
+					width = event.detail.width;
+
+					if(width && width !== elem._lazysizesWidth){
+						sizeElement(elem, parent, event, width);
+					}
+				}
+			}
+		};
+
+		var updateElementsSizes = function(){
+			var i;
+			var len = autosizesElems.length;
+			if(len){
+				i = 0;
+
+				for(; i < len; i++){
+					getSizeElement(autosizesElems[i]);
+				}
+			}
+		};
+
+		var debouncedUpdateElementsSizes = debounce(updateElementsSizes);
+
+		return {
+			_: function(){
+				autosizesElems = document.getElementsByClassName(lazySizesCfg.autosizesClass);
+				addEventListener('resize', debouncedUpdateElementsSizes);
+			},
+			checkElems: debouncedUpdateElementsSizes,
+			updateElem: getSizeElement
+		};
+	})();
+
+	var init = function(){
+		if(!init.i && document.getElementsByClassName){
+			init.i = true;
+			autoSizer._();
+			loader._();
+		}
+	};
+
+	setTimeout(function(){
+		if(lazySizesCfg.init){
+			init();
+		}
+	});
+
+	lazysizes = {
+		cfg: lazySizesCfg,
+		autoSizer: autoSizer,
+		loader: loader,
+		init: init,
+		uP: updatePolyfill,
+		aC: addClass,
+		rC: removeClass,
+		hC: hasClass,
+		fire: triggerEvent,
+		gW: getWidth,
+		rAF: rAF,
+	};
+
+	return lazysizes;
+}
+));
+
+},{}],2:[function(require,module,exports){
+"use strict";
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+exports.default = void 0;
+
+var _utils = require("./utils/utils.js");
+
+const bookmarkButtons = {
+  init() {
+    const bookmarkButtons = Array.prototype.slice.call(document.querySelectorAll(".js-bookmark-button"));
+    if (bookmarkButtons.length < 1) return;
+    bookmarkButtons.forEach(bookmarkButtonEl => {
+      bookmarkButtonEl.addEventListener("click", e => {
+        e.preventDefault();
+        this.handleLinkClick(e);
+      });
+    });
+  },
+
+  toggleBookmark(addOrDelete, linkEl, isBookmarked, thingid, bookmarkType) {
+    let action = "POST";
+
+    if (addOrDelete === "delete") {
+      action = "DELETE";
+    }
+
+    const successCB = request => {
+      linkEl.setAttribute("data-bookmarked", !isBookmarked);
+    };
+
+    const errorCB = request => {
+      if (request.status === 401) {
+        // if unauthorized error, redirect to login
+        location.href = `${location.origin}/login`;
+      } else {
+        alert("Sorry, something went wrong.");
+      }
+    };
+
+    const data = JSON.stringify({
+      thingid,
+      bookmarkType
+    });
+    const url = `/bookmark/${addOrDelete}`;
+    (0, _utils.xhrReq)(action, url, data, successCB, errorCB);
+  },
+
+  handleLinkClick(e) {
+    e.preventDefault();
+    const linkEl = e.target.closest("a");
+    const isBookmarked = linkEl.getAttribute("data-bookmarked") === "true";
+    const bookmarkType = linkEl.getAttribute("data-type");
+    const thingid = linkEl.getAttribute("data-thing-id");
+
+    if (isBookmarked) {
+      this.toggleBookmark("delete", linkEl, isBookmarked, thingid, bookmarkType);
+    } else {
+      this.toggleBookmark("add", linkEl, isBookmarked, thingid, bookmarkType);
+    }
+  }
+
+};
+var _default = bookmarkButtons;
+exports.default = _default;
+
+},{"./utils/utils.js":10}],3:[function(require,module,exports){
+"use strict";
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+exports.default = void 0;
+const csvGenerator = {
+  init() {
+    const downloadCsvBtnEl = document.querySelector(".js-download-csv-btn");
+
+    if (downloadCsvBtnEl) {
+      downloadCsvBtnEl.addEventListener("click", e => {
+        let url = `${window.location.href}&returns=csv`;
+        window.open(url, '_blank');
+      });
+    }
+  }
+
+};
+var _default = csvGenerator;
+exports.default = _default;
+
+},{}],4:[function(require,module,exports){
+"use strict";
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+exports.default = void 0;
+
+var _modal = _interopRequireDefault(require("./modal.js"));
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+const infoIconToModal = {
+  init() {
+    const infoTriggerEls = document.querySelectorAll(".js-info-modal__trigger");
+
+    for (let i = 0; i < infoTriggerEls.length; i++) {
+      infoTriggerEls[i].addEventListener("click", event => {
+        this.openInfoModal(event);
+      });
+    }
+  },
+
+  openInfoModal(event) {
+    event.preventDefault();
+    const triggerEl = event.target.closest("a");
+    const header = triggerEl.querySelector(".js-info-modal__header").innerHTML;
+    const body = triggerEl.querySelector(".js-info-modal__body").innerHTML;
+    const content = `
+      <h3>${header}</h3>
+      <p>${body}</p>
+    `;
+
+    _modal.default.updateModal(content);
+
+    _modal.default.openModal("aria-modal", {
+      showCloseBtn: true
+    });
+  }
+
+};
+var _default = infoIconToModal;
+exports.default = _default;
+
+},{"./modal.js":6}],5:[function(require,module,exports){
+"use strict";
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+exports.default = void 0;
+
+require("lazysizes");
+
+const lazyLoadImages = {
+  init() {
+    document.addEventListener("lazybeforeunveil", e => {
+      const bgUrl = e.target.getAttribute("data-bg");
+
+      if (bgUrl) {
+        e.target.style.backgroundImage = `url(${bgUrl})`;
+      }
+    });
+  }
+
+};
+var _default = lazyLoadImages;
+exports.default = _default;
+
+},{"lazysizes":1}],6:[function(require,module,exports){
+"use strict";
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+exports.default = void 0;
+// ARIAmodal is included via a script tag in main.html
+// because it doesn't use a module system and attaches to the window object instead
+const modal = {
+  updateModal(content) {
+    document.querySelector("[data-modal-content]").innerHTML = content;
+  },
+
+  openModal(id, options = {}) {
+    // open the modal
+    // using setTimeout with 1 ms delay to simulate the _.defer function,
+    // which forces the program to wait until the current call stack has cleared before calling open
+    setTimeout(() => {
+      ARIAmodal.openModal(options, id);
+    }, 1); // if we are showing the close button,
+    // make it visible and attach click handler
+
+    const modalEl = document.getElementById(id);
+
+    if (options.showCloseBtn) {
+      modalEl.querySelector("[data-modal-footer]").style.display = "block";
+      modalEl.addEventListener("click", e => {
+        if (e.target.closest("[data-modal-close]")) {
+          ARIAmodal.closeModal(options, id);
+        }
+      });
+    } else {
+      modalEl.querySelector("[data-modal-footer]").style.display = "none";
+    }
+  },
+
+  closeModal() {
+    ARIAmodal.closeModal();
+  }
+
+};
+var _default = modal;
+exports.default = _default;
+
+},{}],7:[function(require,module,exports){
+"use strict";
+
+var _tabsWithCards = _interopRequireDefault(require("./tabs-with-cards.js"));
+
+var _bookmarkButtons = _interopRequireDefault(require("./bookmark-buttons.js"));
+
+var _lazyLoadImages = _interopRequireDefault(require("./lazy-load-images.js"));
+
+var _infoIconToModal = _interopRequireDefault(require("./info-icon-to-modal.js"));
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+document.addEventListener("DOMContentLoaded", () => {
+  _bookmarkButtons.default.init();
+
+  _tabsWithCards.default.init();
+
+  _lazyLoadImages.default.init();
+
+  _infoIconToModal.default.init();
+});
+
+},{"./bookmark-buttons.js":2,"./info-icon-to-modal.js":4,"./lazy-load-images.js":5,"./tabs-with-cards.js":8}],8:[function(require,module,exports){
+"use strict";
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+exports.default = void 0;
+
+var _utils = require("./utils/utils.js");
+
+var _modal = _interopRequireDefault(require("./modal.js"));
+
+var _tracking = _interopRequireDefault(require("./utils/tracking.js"));
+
+var _csvGenerator = _interopRequireDefault(require("./csv-generator.js"));
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+const tabsWithCards = {
+  init() {
+    this.tabInputEls = Array.prototype.slice.call(document.querySelectorAll(".js-tab-container input[name='tabs']"));
+    this.localTabInputEls = Array.prototype.slice.call(document.querySelectorAll(".js-tab-container input[name='tabs'][data-local='local']"));
+    this.viewEl = document.querySelector("[data-card-layout]");
+    this.localForms = document.querySelectorAll("form[data-local=local]");
+    if (this.tabInputEls.length === 0 && this.localTabInputEls.length === 0) return; // Initiate CSV generator
+
+    this.initiateCsvGenerator(); // tabs ui
+
+    if (this.localTabInputEls.length > 0) {
+      this.initLocalDesktopTabNav();
+      this.initLocalMobileTabNav();
+    } else {
+      this.initDesktopTabNav();
+      this.initMobileTabNav();
+    }
+
+    if (!this.viewEl) return; // cards ui
+
+    this.initCardLayout();
+    this.initPagination(); // More Filters Button
+
+    const moreFilterBtnEls = document.querySelectorAll(".js-tab-buttons-button-filter");
+    moreFilterBtnEls.forEach(moreFilterBtnEl => {
+      if (moreFilterBtnEl) {
+        moreFilterBtnEl.addEventListener("click", event => {
+          const category = (0, _utils.getValueForParam)("selectedCategory");
+
+          if (["case", "organizations", "method"].indexOf(category) >= 0) {
+            this.openSearchFilterModal();
+          } else {
+            (0, _utils.updateUrlParams)("selectedCategory", "case");
+            (0, _utils.updateUrlParams)("openFilters", "1");
+            window.location.href = window.location.href;
+          }
+
+          _tracking.default.send("search", "filter_button_click");
+        });
+      }
+    });
+    const downloadCsvBtnEl = document.querySelector(".js-download-csv-btn");
+
+    if (downloadCsvBtnEl) {
+      downloadCsvBtnEl.addEventListener("click", e => {
+        // Custom logic for CSV download button if category is all.
+        if (!this.isCsvGenerator()) {
+          // Update selectedCategory to case and reload the page.
+          (0, _utils.updateUrlParams)("selectedCategory", "case");
+          window.location.href = window.location.href; // Download CSV cases
+
+          let url = `${window.location.href}&returns=csv`;
+          window.open(url, '_blank');
+        }
+
+        _tracking.default.send("search", "results_csv_button_click");
+      });
+    }
+
+    const openFilter = (0, _utils.getValueForParam)("openFilters");
+
+    if (openFilter == "1") {
+      this.openSearchFilterModal();
+    }
+  },
+
+  initiateCsvGenerator() {
+    if (this.isCsvGenerator()) {
+      _csvGenerator.default.init();
+    }
+  },
+
+  isCsvGenerator() {
+    const category = (0, _utils.getValueForParam)("selectedCategory");
+    return ["case", "organizations", "method"].indexOf(category) >= 0;
+  },
+
+  openSearchFilterModal() {
+    _modal.default.openModal("search-filter-modal", {
+      showCloseBtn: true
+    });
+  },
+
+  navigateToTab(category) {
+    const query = (0, _utils.getValueForParam)("query");
+    let url = `${window.location.origin + window.location.pathname}?selectedCategory=${category}`;
+
+    if (query) {
+      url = `${url}&query=${query}`;
+    }
+
+    window.location.href = url;
+  },
+
+  navigateToLocalTab(tabName) {
+    // reference to all forms
+    // $(localForms).hide();
+    this.localForms.forEach(el => el.classList.add('hide'));
+    document.querySelector(`form[data-lang='${tabName}']`).classList.remove('hide');
+  },
+
+  initLocalDesktopTabNav() {
+    // update url param to indicate current tab
+    this.localTabInputEls.forEach(el => {
+      el.addEventListener("click", event => {
+        this.navigateToLocalTab(event.target.id);
+      });
+    });
+    this.localForms.forEach(el => el.classList.add('hide'));
+    this.localTabInputEls[0].click();
+  },
+
+  initLocalMobileTabNav() {
+    // TODO: Implement local mobile navigation
+    const selectEl = document.querySelector(".js-tab-select-container select");
+    if (!selectEl) return; // select current tab
+
+    const optionEls = Array.prototype.slice.call(selectEl.querySelectorAll("option"));
+    const currentTab = this.tabInputEls.find(el => el.checked);
+    optionEls.forEach(el => el.selected = el.value === currentTab.id); // event listener for select change
+
+    selectEl.addEventListener("change", event => {
+      // change tab to selected type
+      const newTabId = event.target.value; // toggle checked attr on inputs
+
+      this.tabInputEls.forEach(el => el.checked = el.id === newTabId); // go to new tab
+
+      this.navigateToTab(newTabId);
+    });
+  },
+
+  initDesktopTabNav() {
+    // update url param to indicate current tab
+    this.tabInputEls.forEach(el => {
+      el.addEventListener("click", event => {
+        this.navigateToTab(event.target.id);
+      });
+    });
+  },
+
+  initMobileTabNav() {
+    const selectEl = document.querySelector(".js-tab-select-container select");
+    if (!selectEl) return; // select current tab
+
+    const optionEls = Array.prototype.slice.call(selectEl.querySelectorAll("option"));
+    const currentTab = this.tabInputEls.find(el => el.checked);
+    optionEls.forEach(el => el.selected = el.value === currentTab.id); // event listener for select change
+
+    selectEl.addEventListener("change", event => {
+      // change tab to selected type
+      const newTabId = event.target.value; // toggle checked attr on inputs
+
+      this.tabInputEls.forEach(el => el.checked = el.id === newTabId); // go to new tab
+
+      this.navigateToTab(newTabId);
+    });
+  },
+
+  initPagination() {
+    const paginationNavEls = Array.prototype.slice.call(this.viewEl.querySelectorAll(".js-pagination-nav"));
+    paginationNavEls.forEach(el => {
+      el.addEventListener("click", event => {
+        event.preventDefault();
+        const link = event.target.closest("a");
+
+        if (link) {
+          (0, _utils.updateUrlParams)("page", link.getAttribute("data-page-num"));
+          window.location.href = window.location.href;
+        }
+      });
+    });
+  },
+
+  initCardLayout() {
+    const toggleLayoutBtnsEls = this.viewEl.querySelectorAll(".js-card-layout-btn");
+
+    for (let index = 0; index < toggleLayoutBtnsEls.length; index++) {
+      const btnEl = toggleLayoutBtnsEls[index]; // event listeners for grid/list toggle buttons
+
+      btnEl.addEventListener("click", event => {
+        const type = btnEl.getAttribute("data-type");
+        if (!type) return;
+        (0, _utils.updateUrlParams)("layout", type);
+        this.viewEl.setAttribute("data-card-layout", type);
+      });
+    }
+  }
+
+};
+var _default = tabsWithCards;
+exports.default = _default;
+
+},{"./csv-generator.js":3,"./modal.js":6,"./utils/tracking.js":9,"./utils/utils.js":10}],9:[function(require,module,exports){
+"use strict";
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+exports.default = void 0;
+
+// Utility function to handle case when Google Analytics is down or slow.
+// If the `event_callback` fn called in `sendWithCallback` hasn't been called within 1s, execute the callback.
+// The following utility function accepts a function as input and returns a new function. If the returned function is called before the timeout period (the default timeout is one second), it clears the timeout and invokes the input function. If the returned function isn't called before the timeout period, the input function is called regardless.
+function createFunctionWithTimeout(callback, opt_timeout) {
+  var called = false;
+
+  function fn() {
+    if (!called) {
+      called = true;
+      callback();
+    }
+  }
+
+  setTimeout(fn, opt_timeout || 1000);
+  return fn;
+}
+
+const tracking = {
+  send(eventCategory, eventAction, eventLabel = "") {
+    if (!gtag) return;
+    gtag("event", eventAction, {
+      event_category: eventCategory,
+      event_label: eventLabel,
+      event_action: eventAction
+    });
+  },
+
+  sendWithCallback(eventCategory, eventAction, eventLabel = "", callback) {
+    if (!gtag) {
+      callback();
+      return;
+    }
+
+    gtag("event", eventAction, {
+      event_category: eventCategory,
+      event_label: eventLabel,
+      event_action: eventAction,
+      event_callback: createFunctionWithTimeout(callback)
+    });
+  }
+
+};
+var _default = tracking;
+exports.default = _default;
+
+},{}],10:[function(require,module,exports){
+"use strict";
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+exports.getValueForParam = getValueForParam;
+exports.removeUrlParams = removeUrlParams;
+exports.updateUrlParams = updateUrlParams;
+exports.xhrReq = xhrReq;
+
+function getValueForParam(paramName) {
+  const params = window.location.search;
+  const newParams = {};
+
+  if (params) {
+    params.split("?")[1].split("&").map(p => p.split("=")).forEach(param => newParams[param[0]] = param[1]);
+  }
+
+  return newParams[paramName];
+}
+
+function updateUrlParams(key, value) {
+  const params = window.location.search;
+  const newParams = {};
+
+  if (params) {
+    const paramsArr = params.split("?")[1].split("&").map(p => p.split("="));
+    paramsArr.forEach(param => newParams[param[0]] = param[1]);
+  } // add/update param
+
+
+  newParams[key] = value;
+  let newParamsString = "";
+  Object.keys(newParams).forEach(key => {
+    newParamsString += `${key}=${newParams[key]}&`;
+  }); // update url without reloading page
+
+  const basePath = window.location.origin + window.location.pathname;
+  history.pushState({}, "", `${basePath}?${newParamsString.slice(0, -1)}`);
+}
+
+function removeUrlParams(keysToRemove) {
+  if (!window.location.search) return;
+  const paramsToKeep = {};
+  window.location.search.split("?")[1].split("&").map(p => p.split("=")).forEach(param => {
+    if (!keysToRemove.includes(param[0])) {
+      paramsToKeep[param[0]] = param[1];
+    }
+  });
+  let newParamsString = "";
+  Object.keys(paramsToKeep).forEach(key => {
+    newParamsString += `${key}=${paramsToKeep[key]}&`;
+  }); // update url without reloading page
+
+  const basePath = window.location.origin + window.location.pathname;
+  history.pushState({}, "", `${basePath}?${newParamsString.slice(0, -1)}`);
+}
+
+function xhrReq(action, url, data = {}, successCB = null, errorCB = null) {
+  const errorCodes = [500, 400, 401];
+  const request = new XMLHttpRequest();
+  request.open(action, url, true);
+
+  request.onreadystatechange = () => {
+    if (request.readyState === 4 && errorCodes.includes(request.status)) {
+      if (errorCB) errorCB(request);
+    } else if (request.readyState === 4) {
+      if (successCB) successCB(request);
+    }
+  };
+
+  request.setRequestHeader("Content-Type", "application/json");
+  request.send(data);
+}
+
+},{}]},{},[7]);
